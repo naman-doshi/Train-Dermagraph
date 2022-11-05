@@ -2,22 +2,15 @@ from pathlib import Path
 import pandas as pd
 from torch.utils.data import Dataset,DataLoader
 from PIL import Image
-from torchvision import transforms as T
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
-from sklearn.model_selection import GroupKFold
 import numpy as np
 from fastprogress.fastprogress import master_bar, progress_bar
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import roc_auc_score
 from efficientnet_pytorch import EfficientNet
-from torchvision import models
-import pdb
 import albumentations as A
 from albumentations.pytorch.transforms import ToTensor
-import matplotlib.pyplot as plt
-import pickle
-import imgaug
 
 # mps for Apple Silicon, gpu for a Nvidia GPU, or cpu otherwise.
 device = torch.device("mps")
@@ -27,6 +20,7 @@ def list_files(path:Path):
 
 path = Path('input')
 
+# Initialising full MelanomaDataset class
 class MelanomaDataset(Dataset):
     def __init__(self, df, img_path_one, transforms=None, is_test=False):
         self.df = df
@@ -50,6 +44,7 @@ class MelanomaDataset(Dataset):
     def __len__(self):
         return self.df.shape[0]
 
+# Function to use data augmentations on any given image.
 def get_augmentations(p=0.5):
 
     # Assigning the ImageNet mean and standard deviation to a variable
@@ -113,6 +108,7 @@ def get_augmentations(p=0.5):
     
     return train_tf, test_tf
 
+# Function to split the train and validation datasets.
 def get_train_val_split(df):
     # Removal of duplicates
     df = df[df.tfrecord != -1].reset_index(drop=True)
@@ -124,6 +120,7 @@ def get_train_val_split(df):
     valid = df[~split_cond].reset_index()
     return train, valid
 
+# Initilisation of the model class.
 class Model(nn.Module):
     def __init__(self, model_name='efficientnet-b0', pool=F.adaptive_avg_pool2d):
         super().__init__()
@@ -138,6 +135,7 @@ class Model(nn.Module):
         features = features.view(x.size(0),-1)
         return self.classifier(features)
 
+# Initilisation of the model.
 def get_model(model_name='efficientnet-b0', lr=1e-5, wd=0.01, freeze_backbone=False, opt_fn=torch.optim.AdamW, device=None):
     model = Model(model_name=model_name)
 
@@ -170,6 +168,7 @@ def validation(xb,yb,model,loss_fn,device):
     out = torch.sigmoid(out)
     return loss.item(),out
 
+# Create DataLoader objects for PyTorch training.
 def get_data(train_df, valid_df, train_tfms, test_tfms, bs):
     train_ds = MelanomaDataset(df=train_df, img_path_one=path/'train', transforms=train_tfms)
     valid_ds = MelanomaDataset(df=valid_df, img_path_one=path/'train', transforms=test_tfms)
@@ -177,6 +176,7 @@ def get_data(train_df, valid_df, train_tfms, test_tfms, bs):
     valid_dl = DataLoader(dataset=valid_ds, batch_size=bs*2, shuffle=False, num_workers=4)
     return train_dl, valid_dl
 
+# The main training algorithm.
 def fit(epochs, model, train_dl, valid_dl, opt, devic=None, loss_fn=F.binary_cross_entropy_with_logits):
     devic = device
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, len(train_dl)*epochs)
@@ -218,22 +218,26 @@ def fit(epochs, model, train_dl, valid_dl, opt, devic=None, loss_fn=F.binary_cro
     return model,val_rocs
 
 if __name__ ==  '__main__':
+    # Training the model
     df = pd.read_csv(path/'train.csv')
     train_df, valid_df = get_train_val_split(df)
     train_tfms, test_tfms = get_augmentations(p=0.5)
     train_dl, valid_dl = get_data(train_df, valid_df, train_tfms, test_tfms, 16)
-    model, opt = get_model(model_name='efficientnet-b1', lr=1e-4, wd=1e-4)
-    model, val_rocs = fit(8, model, train_dl, valid_dl, opt)
+    model, opt = get_model(model_name='efficientnet-b0', lr=1e-4, wd=1e-4)
+    model, val_rocs = fit(6, model, train_dl, valid_dl, opt)
     print(val_rocs)
-    torch.save(model.state_dict(), f'effb1.pth')
+    torch.save(model.state_dict(), f'effb0.pth')
 
-    model, opt = get_model(model_name='efficientnet-b1',lr=1e-4,wd=1e-4)
-    model.load_state_dict(torch.load(f'effb1.pth', map_location=device))
+
+    # Testing the model
+    model, opt = get_model(model_name='efficientnet-b0',lr=1e-4,wd=1e-4)
+    model.load_state_dict(torch.load(f'effb0.pth', map_location=device))
     model.eval()
     test_df = pd.read_csv(path/'test.csv')
     test_ds = MelanomaDataset(df=test_df, img_path_one=path/'test',transforms=test_tfms, is_test=True)
     test_dl = DataLoader(dataset=test_ds, batch_size=32, shuffle=False,num_workers=4)
     
+    # Number of TTA Cycles
     tta = 1
     preds = np.zeros(len(test_ds))
     for tta_id in range(tta):
@@ -241,19 +245,18 @@ if __name__ ==  '__main__':
         test_preds = []
         with torch.no_grad():
             for xb in test_dl:
-                print(count)
                 xb = xb.to(device)
                 out = model.to(device)(xb)
                 out = torch.sigmoid(out)
                 test_preds.extend(out.cpu().detach().numpy())
-                print(test_preds)
                 count += 1
             preds += np.array(test_preds).reshape(-1)
         print(f'TTA {tta_id+1}')
     preds /= tta
 
+    # Creating a csv in the ISIC Competition Format.
     subm = pd.read_csv(path/'sample_submission.csv')
     subm.target = preds
-    subm.to_csv('submissions/submission2.csv', index=False)
+    subm.to_csv('submissions/submission.csv', index=False)
 
       
